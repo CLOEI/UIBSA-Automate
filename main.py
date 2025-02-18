@@ -2,12 +2,20 @@ import requests
 import base64
 import json
 import os
+import sys
+import logging
 
 from category import kdko, klydu, ksdpm, pacdpb, pddp, pdppapkm, pi, sedk
 from pdf2image import convert_from_path
 from anthropic import Anthropic
 from io import BytesIO
 from thefuzz import process
+
+logger = logging.getLogger(__name__)
+stdout_handler = logging.StreamHandler(stream=sys.stdout)
+format_output = logging.Formatter('%(levelname)s : %(asctime)s : %(message)s')
+stdout_handler.setFormatter(format_output)    
+logger.addHandler(stdout_handler)
 
 with open("config.json", "r") as f:
     config = json.load(f)
@@ -17,15 +25,19 @@ client = Anthropic(
 )
 
 def get_cert_scan_data_result(data):
+    logger.info("Scanning certificate")
     message = client.messages.create(
         model="claude-3-haiku-20240307",
-        max_tokens=1000,
-        temperature=0,
-        system="Dengan mengambil sudut pandang mahasiswa yang ingin mengsubmit sertifikasi yang diterimanya ambil data dari foto yang diberikan. Jika itu merupakan webinar berarti itu merupakan pengembangan diri\n\nList kategori :\nPengembangan Diri dan profesionalisme\nPrestasi/Capaian dan Pengembangan Bakat\nKegiatan Sosial dan Pemberdayaan Masyarakat\nKepemimpinan dan Kemampuan Organisasi\nSpiritual,Etika dan Karakter\nPublikasi dan Proses Penelitian/PkM\nProgram Internasional\nKegiatan Lain Yang Diakui Universitas\n\njawab hanya satu dengan format seperti ini pastikan tanggal sesuai dengan format: nama acara, dd/mm/yyyy, nama kategori",
+        max_tokens=4096,
+        temperature=1,
         messages=[
             {
                 "role": "user",
                 "content": [
+                    {
+                        "type": "text",
+                        "text": "You will be analyzing a description of a certificate image and extracting specific information from it. The image description will be provided to you in the following format:\n"
+                    },
                     {
                         "type": "image",
                         "source": {
@@ -33,6 +45,10 @@ def get_cert_scan_data_result(data):
                             "media_type": "image/jpeg",
                             "data": data
                         }
+                    },
+                    {
+                        "type": "text",
+                        "text": "\nYour task is to extract the following information from the certificate image description:\n\n1. Name of the certificate recipient\n2. Role of the participant\n3. Name of the event or activity\n4. Location where the certificate was given\n5. Date when the certificate was given\n\nAfter extracting this information, you need to categorize the certificate into one of the following categories:\n\n- Pengembangan Diri dan profesionalisme\n- Prestasi/Capaian dan Pengembangan Bakat\n- Kegiatan Sosial dan Pemberdayaan Masyarakat\n- Kepemimpinan dan Kemampuan Organisasi\n- Spiritual,Etika dan Karakter\n- Publikasi dan Proses Penelitian/PkM\n- Program Internasional\n- Kegiatan Lain Yang Diakui Universitas\n\nChoose the category that best fits the certificate based on the information provided in the image description if the event name for a webinar it would be \"Pengembangan Diri dan profesionalisme\"\n\nPresent your findings in a JSON format with the following structure:\n\n{\n  \"recipient_name\": \"\",\n  \"participant_role\": \"\",\n  \"event_name\": \"\",\n  \"location\": \"\",\n  \"date\": \"\",\n  \"category\": \"\"\n}\n\nIf any of the required information is not available in the image description, use \"Not specified\" as the value for that field.\n\nImportant: Base all your extracted information solely on the content provided in the image description. Do not make assumptions or add information that is not explicitly stated in the description."
                     }
                 ]
             }
@@ -65,19 +81,40 @@ def get_category_type_from_image(img_data, data):
     return message.content[0].text
 
 session = requests.Session()
+logger.info("Trying to login to UIB sa")
 r = session.post("https://sa.uib.ac.id/Login", data={"username": config["username"], "password": config["password"]})
+logger.info("Fetching list of certificates")
 r = session.post("https://sa.uib.ac.id//PenambahanKegiatan/Kegiatan/GetListKegiatan", data={"search": ""})
 
 try:
     sertifikat_yang_diakui = r.json()
     choices = [x["text"] for x in sertifikat_yang_diakui]
     for filename in os.listdir("certificates"):
+        logger.info(f"Processing {filename}")
         pdf_path = os.path.join("certificates", filename)
-        image = convert_from_path(pdf_path)[0]
+        image = convert_from_path(pdf_path, poppler_path="./poppler")[0]
 
         buffered = BytesIO()
         image.save(buffered, format="JPEG")
         img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
+        cert_data = json.loads(get_cert_scan_data_result(img_str))
+        
+        name = cert_data["recipient_name"]
+        role = cert_data["participant_role"]
+        event_name = cert_data["event_name"]
+        location = cert_data["location"]
+        date = cert_data["date_issued"]
+        category = cert_data["category"]
+
+        print(f"Name: {name}")
+        print(f"Role: {role}")
+        print(f"Event: {event_name}")
+        print(f"Location: {location}")
+        print(f"Date: {date}")
+        print(f"Category: {category}")
+        
+
+        break;
         [name, date, category] = get_cert_scan_data_result(img_str).split(",")
         (text, score) = process.extractOne(name, choices)
         certificate_id = [x["id"] for x in sertifikat_yang_diakui if x["text"] == text][0]
@@ -136,4 +173,4 @@ try:
         else:
             print("Category not found")
 except json.JSONDecodeError:
-    print("Site probably down")
+    logger.error("UIB SA Probably down or invalid credentials")
